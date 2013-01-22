@@ -35,7 +35,7 @@
 -export([open/1, open/2, open/3, open/4, close/1]).
 -export([send_data/2, get_data/1]).
 
--include("elog.hrl").
+-include_lib("elog/include/elog.hrl").
 
 -define(TELNET_PORT, 23).
 -define(OPEN_TIMEOUT,10000).

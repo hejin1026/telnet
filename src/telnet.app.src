@@ -1,0 +1,9 @@
+{application, telnet,
+ [
+  {description, "telnet"},
+  {vsn, "1.0"},
+  {registered, [telent]},
+  {applications, []},
+  {mod, {}},
+  {env, []}
+ ]}.
