@@ -98,6 +98,7 @@ get_data(Pid) ->
     Pid ! {get_data, self()},
     receive 
         {data,Data} ->
+            ?INFO("telnet_client get_data:~p", [Data]),
             {ok, Data}
     end.
 
@@ -127,7 +128,7 @@ loop(State, Sock, Acc) ->
                     ok
             end;
         {tcp,_,Msg0} ->
-            ?INFO("tcp msg: ~p~n",[Msg0]),
+%            ?INFO("tcp msg: ~p~n",[Msg0]),
             Msg = check_msg(Sock,Msg0,[]),
             loop(State, Sock, [Msg | Acc]);
         {send_data,Data} ->

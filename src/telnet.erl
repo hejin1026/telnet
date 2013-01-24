@@ -5,10 +5,10 @@
 
 -compile(export_all).
 
--export([open/3, open/4, cmd/2, config/1, send/2, close/1]).
+-export([open/4, cmd/2, config/1, send/2, close/1]).
 
 %% Callbacks
--export([init/3,handle_msg/2,reconnect/2,terminate/2]).
+-export([init/6,handle_msg/2,reconnect/1,terminate/2]).
 
 %% Tool internals
 -export([silent_teln_expect/5, teln_receive_until_prompt/3, teln_cmd/4]).
@@ -82,11 +82,11 @@ call(Pid,Msg) ->
 init(Parent,Ip,Port,UserName,Password,State) ->
     process_flag(trap_exit,true),
     case catch connect(Ip,Port,UserName,Password,State) of
-        {ok,ConnPid,State} when is_pid(ConnPid) ->
+        {ok,ConnPid,NewState} when is_pid(ConnPid) ->
             link(ConnPid),
             put(conn_pid,ConnPid),
             Parent ! {connected,self()},
-            loop(State);
+            loop(NewState);
         {error,Reason} ->
             Parent ! {{error,Reason},self()}
     end.
@@ -136,7 +136,7 @@ loop(State) ->
                     put(conn_pid,NewPid),
                     loop(NewState);
                 Error ->
-                    ?INFO("Reconnect failed. Giving up!","Reason: ~p\n",[Error])
+                    ?INFO("Reconnect failed. Giving up!Reason: ~p\n",[Error])
             end;
         {'EXIT',_Pid,_Reason} ->
             loop(State);
@@ -144,7 +144,7 @@ loop(State) ->
             terminate(State#state.teln_pid,State),
             return(From,ok),
             ok;
-        {{retry,{Error,_Name,CPid,_Msg}}, From} when CPid == State#state.conn_pid ->
+        {{retry,{Error,_Name,CPid,_Msg}}, From} when CPid == State#state.teln_pid ->
             %% only retry if failure is because of a reconnection
             Return = case Error of
                  {error,_} -> Error;
@@ -153,7 +153,7 @@ loop(State) ->
             return(From, Return),
             loop(State);
         {{retry,{_Error,_Name,_CPid,Msg}}, From} ->
-            ?ERROR("Rerunning command","Connection reestablished. Rerunning command...",[]),
+            ?ERROR("Rerunning command,Connection reestablished. Rerunning command...",[]),
             {Return,NewState} = handle_msg(Msg,State),
             return(From, Return),
             loop(NewState);
@@ -163,24 +163,24 @@ loop(State) ->
             loop(NewState)
     end.
 
-handle_msg(config,State) ->
-    case State#state.target_mod:config() of
-        {ok, NewPid} ->
-            {ok, NewPid, State#state{teln_pid=NewPid}};
+handle_msg(config, #state{teln_pid=NewPid, prx=Prx}=State) ->
+    case (State#state.target_mod):config(NewPid, Prx) of
+        {ok, Data} ->
+            {{ok, Data},  State};
         Error ->
             ?INFO("Reconnect failed: ~p",[Error]),
-            Error
+            {Error, State}
     end;
 
 handle_msg({cmd,Cmd,Timeout},State) ->
-    case {State#state.type,State#state.prompt} of
-        {ip,false} ->
+    case State#state.prompt of
+        false ->
             silent_teln_expect(State#state.teln_pid,
                                       State#state.buffer,
                                       prompt,
                                       State#state.prx,
                                       [{timeout,200}]);
-        {ip,true} ->
+        true ->
             ok
     end,
 
@@ -202,14 +202,14 @@ handle_msg({cmd,Cmd,Timeout},State) ->
 
 handle_msg({send,Cmd},State) ->
     ?INFO("Cmd: ~p",[Cmd]),
-    case {State#state.type,State#state.prompt} of
-        {ip,false} ->
+    case State#state.prompt of
+        false ->
             silent_teln_expect(State#state.teln_pid,
                                       State#state.buffer,
                                       prompt,
                                       State#state.prx,
                                       [{timeout,200}]);
-        {ip,true} ->
+        true ->
             ok
     end,
     telnet_client:send_data(State#state.teln_pid,Cmd),
@@ -225,7 +225,7 @@ handle_msg(get_data,State) ->
 
 terminate(TelnPid,State) ->
     ?INFO("Closing telnet connection.\nId: ~p",[TelnPid]),
-    State#state.target_mod:close(TelnPid).
+    (State#state.target_mod):close(TelnPid).
 
 return({To,Ref},Result) ->
     To ! {Ref, Result}.
@@ -436,7 +436,7 @@ one_expect(Data,Pattern,EO) ->
 		[Prompt] when Prompt==prompt; Prompt=={prompt,PromptType} ->
 		    %% Only searching for prompt
 		    log_lines(UptoPrompt),
-		    ?INFO("<b>PROMPT:</b> ~s", [PromptType]),
+		    ?INFO("PROMPT:~s", [PromptType]),
 		    {match,{prompt,PromptType},Rest};
 		[{prompt,_OtherPromptType}] ->
 		    %% Only searching for one specific prompt, not thisone
@@ -599,8 +599,7 @@ match_line(Line,[Pattern|Patterns],FoundPrompt,EO,RetTag) ->
     end;
 match_line(Line,[],FoundPrompt,EO,match) ->
     match_line(Line,EO#eo.haltpatterns,FoundPrompt,EO,halt);
-match_line(Line,[],_FoundPrompt,_EO,halt) ->
-    %%try_cont_log("       ~s", [Line]),
+match_line(_Line,[],_FoundPrompt,_EO,halt) ->
     nomatch.
 
 one_line([$\n|Rest],Line) ->
