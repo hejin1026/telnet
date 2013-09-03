@@ -2,14 +2,14 @@
 
 -author("hejin 2011-8-17").
 
--export([connect/6, config/2,
-        get_prompt_regexp/0, get_new_prompt/1,
-        close/2
-        ]).
+-behavior(telnet_mod).
+
+-export([connect/6, get_prompt_regexp/0, close/1]).
+
+-export([backup_data/1, backup_file/1]).
 
 -include_lib("elog/include/elog.hrl").
 
--define(CONN_TIMEOUT, 10000).
 -define(CMD_TIMEOUT, 9000).
 
 -define(username, "User name:").
@@ -19,6 +19,8 @@
 -define(page, "---- More.* ----").
 -define(logout, "Are you sure to log out").
 -define(prx, ?comfirm ++ "|" ++ ?page ++ "|" ++ ?logout).
+
+-define(keepalive, true).
 
 -define(splite, "\n").
 
@@ -30,13 +32,11 @@ get_prompt_regexp() ->
     ?prx.
 
 get_new_prompt(Head) ->
-    ?prx ++ "|" ++ Head .
+    ?prx ++ "|" ++ Head.
 
-close(Pid, Head) ->
-    ?INFO("close telnet....~p",[Head]),
-    get_data(Pid, ?cmd_close, Head),
-    telnet_client:send_data(Pid, "y"),
-    telnet_client:close(Pid).
+close(Pid) ->
+	telnet:teln_cmd(Pid, ?cmd_close, ?logout, ?CMD_TIMEOUT),
+    telnet_client:send_data(Pid, "y").
 
 connect(Ip,Port,Timeout,KeepAlive,Username,Password) ->
     ?INFO("telnet:connect",[]),
@@ -58,11 +58,11 @@ connect(Ip,Port,Timeout,KeepAlive,Username,Password) ->
                                             get_date_until_name(Pid);
                                         Error ->
                                             ?WARNING("Password failed\n~p\n", [Error]),
-                                            {error,Error}
+                                            {error,"Password failed"}
                                     end;
                                 Error ->
                                     ?WARNING("Login failed\n~p\n",[Error]),
-                                    {error,Error}
+                                    {error,"Login failed"}
                             end;
                         {ok,[{prompt,_OtherPrompt1},{prompt,_OtherPrompt2}],_} ->
                             {ok,Pid, "."};
@@ -90,34 +90,48 @@ get_date_until_name(Pid) ->
             {error,Error}
     end.
 
-%flow
-config(Pid, Prx) ->
-    get_data(Pid, ?cmd_enable, Prx),
-    {ok, Data} = get_data(Pid, ?cmd_config, Prx),
-    ?INFO("get data :~p", [Data]),
-    {ok, Data}.
 
-get_data(Pid, Cmd, NewPrx) ->
-    get_data(Pid, Cmd, NewPrx, []).
+%%%%%%%% i am a splite line  %%%%%%%%
 
-get_data(Pid, Cmd, NewPrx, Acc) ->
-    ?INFO("newprx ; ~p", [NewPrx]),
-    case telnet:teln_cmd(Pid, Cmd, NewPrx, ?CMD_TIMEOUT) of
+%% for data
+backup_data(Pid) ->
+    telnet:cmd(Pid, ?cmd_enable),
+    get_data(Pid, ?cmd_config).
+
+
+%% for file
+backup_file(Pid) ->
+     get_data(Pid, ?cmd_enable),
+     {H, MM, _S} = time(),
+     Cmd1 = lists:concat(["backup configuration ftp 136.6.162.72 ", extbif:strfdate(date()),H,MM,"_config.txt"]),
+     telnet:cmd(Pid, Cmd1),
+     Cmd2 = lists:concat(["backup data ftp 136.6.162.72 ", extbif:strfdate(date()),H,MM, "_data.txt"]),
+     telnet:cmd(Pid, Cmd2).
+
+
+%%
+get_data(Pid, Cmd) ->
+    get_data(Pid, Cmd, []).
+
+get_data(Pid, Cmd, Acc) ->
+    case telnet:cmd(Pid, Cmd, ?CMD_TIMEOUT) of
         {ok, Data, "section<K>|" , Rest} ->
             ?INFO("get more :~p",[Rest]),
             Data1 = string:join(Data, ?splite),
-            get_data(Pid, " ", NewPrx, [Data1|Acc]);
+            get_data(Pid, " ", [Data1|Acc]);
         {ok, [Firstline|Data], "---- More" ++ _ , Rest} ->
             ?INFO("more: ~p, First: ~p, ~n, Rest : ~p", [Data, Firstline, Rest]),
-            Data1 =  string:join([check_line(Firstline)|Data], ?splite),
-            Data2 = Data1 ++ check_line(Rest),
-            ?INFO("check_line: ~p, chec_rest : ~p", [Data, check_line(Rest)]),
-            get_data(Pid, " ", NewPrx, [Data2|Acc]);
-        {ok, [Firstline|Data], PromptType, Rest} ->
-            ?INFO("get end data: ~p, PromptType : ~p, ~n, Rest :~p", [Data, PromptType, Rest]),
-            Data1 =  string:join([check_line(Firstline)|Data], ?splite),
+            Data1 =  string:join([Firstline|Data], ?splite),
+            get_data(Pid, " ", [Data1|Acc]);
+        {ok, [Firstline|Data], PromptType, "#"++_} ->
+            ?INFO("get end data: ~p, PromptType : ~p, ~n", [Data, PromptType]),
+            Data1 =  string:join([Firstline|Data], ?splite),
             AllData = string:join(lists:reverse([Data1|Acc]), ?splite),
             {ok, AllData};
+        {ok, [Firstline|Data], PromptType, Rest} ->
+            ?INFO("have prompt, First: ~p, PromptType:~p, ~n, Rest : ~p", [Firstline, PromptType, Rest]),
+            Data1 =  string:join([Firstline|Data], ?splite),
+            get_data(Pid, " ", [Data1|Acc]);
         Error ->
             ?WARNING("Return error: ~p", [Error]),
             Data1 = io_lib:format("telnet send cmd error, cmd: ~p, reason:~p", [Cmd, Error]),
@@ -125,19 +139,4 @@ get_data(Pid, Cmd, NewPrx, Acc) ->
             {ok, AllData}
     end.
 
-check_line(String) ->
-    check_line(String,[]).
-check_line([$\r|Rest],Line) ->
-    check_line(Rest,Line);
-check_line("---- More ( Press 'Q' to break ) ----" ++ Data, Line) ->
-    check_line(Data, Line);
-check_line([$\e] ++"[37D                                     "++ [$\e] ++ "[37D" ++ [$\e] ++ "[1A" ++ Data, Line) ->
-    check_line(Data, Line);
-check_line([$\e] ++"[37D" ++ [$\e] ++ "[1A" ++ Data, Line) ->
-    check_line(Data, Line);
-check_line([$\e] ++"[37D" ++ Data, Line) ->
-    check_line(Data, Line);
-check_line([Char|Rest],Line) ->
-    check_line(Rest,[Char|Line]);
-check_line([],Line) ->
-    lists:reverse(Line).
+

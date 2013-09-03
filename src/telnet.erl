@@ -1,11 +1,12 @@
 
 -module(telnet).
 
--create("hejin 2013-1-5").
+-update("hejin 2013-1-9").
 
 -compile(export_all).
 
--export([open/4, cmd/2, config/1, send/2, close/1]).
+-export([open/4, cmd/2, cmd/3, cmd/4,
+        send/2, close/1]).
 
 %% Callbacks
 -export([init/6,handle_msg/2,reconnect/1,terminate/2]).
@@ -19,15 +20,15 @@
 -define(DEFAULT_TIMEOUT,10000).
 
 -record(state,{teln_pid,
-	       prx,
-	       buffer=[],
-	       prompt=false,
-	       name,
-	       keep_alive=true,
-	       extra,
-	       target_mod,
-	       conn_to=?DEFAULT_TIMEOUT,
-	       com_to=?DEFAULT_TIMEOUT
+           prx,
+           buffer=[],
+           prompt=false,
+           name,
+           keep_alive=true,
+           extra,
+           target_mod,
+           conn_to=?DEFAULT_TIMEOUT,
+           com_to=?DEFAULT_TIMEOUT
        }).
 
 open(TargetMod,Ip,UserName,Password) ->
@@ -43,20 +44,26 @@ open(TargetMod,Ip,Port,UserName,Password) ->
             {ok,Pid};
         {Error,Pid} ->
             receive {'DOWN',MRef,process,_,_} -> ok end,
-		    Error;
+            Error;
         {'DOWN',MRef,process,_,Reason} ->
-		    ?INFO("monet_telnet:Connection process died: ~p\n",[Reason]),
-		    {error,{connection_process_died,Reason}}
+            ?INFO("monet_telnet:Connection process died: ~p\n",[Reason]),
+            {error,{connection_process_died,Reason}}
     end.
     
 cmd(Pid,Cmd) ->
     call(Pid,{cmd,Cmd,default}).
 
-config(Pid) ->
-    call(Pid,config).
+cmd(Pid,Cmd, Timeout) when is_integer(Timeout) ->
+    call(Pid,{cmd,Cmd,Timeout});
+cmd(Pid,Cmd, Prx) ->		
+	call(Pid,{cmd,Cmd,Prx,default}).
+	
+cmd(Pid,Cmd, Prx, Timeout) ->
+    call(Pid,{cmd,Cmd,Prx,Timeout}).	
+	
 
 send(TelnPid,Cmd) ->
-	call(TelnPid,{send,Cmd,default}).
+    call(TelnPid,{send,Cmd,default}).
 
 close(Pid) ->
     call(Pid,stop).
@@ -115,9 +122,9 @@ connect(Ip,Port,UserName,Password,S0) ->
     end.
 
 reconnect(State=#state{target_mod=TargetMod,
-				 keep_alive=KeepAlive,
-				 extra={Ip,Port,UserName,Password},
-				 conn_to=ConnTo}) ->
+                 keep_alive=KeepAlive,
+                 extra={Ip,Port,UserName,Password},
+                 conn_to=ConnTo}) ->
     case TargetMod:connect(Ip,Port,ConnTo,KeepAlive,UserName,Password) of
         {ok, NewPid} ->
             {ok, NewPid, State#state{teln_pid=NewPid}};
@@ -163,22 +170,15 @@ loop(State) ->
             loop(NewState)
     end.
 
-handle_msg(config, #state{teln_pid=NewPid, prx=Prx}=State) ->
-    case (State#state.target_mod):config(NewPid, Prx) of
-        {ok, Data} ->
-            {{ok, Data},  State};
-        Error ->
-            ?INFO("Reconnect failed: ~p",[Error]),
-            {Error, State}
-    end;
-
 handle_msg({cmd,Cmd,Timeout},State) ->
+	handle_msg({cmd,Cmd,State#state.prx,Timeout},State);
+handle_msg({cmd,Cmd,Prx,Timeout},State) ->
     case State#state.prompt of
         false ->
             silent_teln_expect(State#state.teln_pid,
                                       State#state.buffer,
                                       prompt,
-                                      State#state.prx,
+                                      Prx,
                                       [{timeout,200}]);
         true ->
             ok
@@ -189,17 +189,15 @@ handle_msg({cmd,Cmd,Timeout},State) ->
          end,
 
     {Return,NewBuffer,Prompt} = 
-        case teln_cmd(State#state.teln_pid, Cmd, State#state.prx, TO) of
+        case teln_cmd(State#state.teln_pid, Cmd, Prx, TO) of
             {ok,Data,PromptType,Rest} ->
-                ?INFO("Return: ~p", [{ok,Data}]),
-                {{ok,Data,PromptType},Rest,true};
+                {{ok,Data,PromptType,Rest},Rest,true};
             Error ->
-                Retry = {retry,{Error,State#state.name,State#state.teln_pid, {cmd,Cmd,TO}}},
+                Retry = {retry,{Error,State#state.name,State#state.teln_pid, {cmd,Cmd,Prx,TO}}},
                 ?INFO("Return: ~p", [Error]),
                 {Retry,[],false}
         end,
     {Return,State#state{buffer=NewBuffer,prompt=Prompt}};
-
 handle_msg({send,Cmd},State) ->
     ?INFO("Cmd: ~p",[Cmd]),
     case State#state.prompt of
@@ -214,18 +212,18 @@ handle_msg({send,Cmd},State) ->
     end,
     telnet_client:send_data(State#state.teln_pid,Cmd),
     {ok,State#state{buffer=[],prompt=false}};
-
 handle_msg(get_data,State) ->
     {ok,Data,Buffer} = teln_get_all_data(State#state.teln_pid,
-					 State#state.prx,
-					 State#state.buffer,
-					 [],[]),
+                     State#state.prx,
+                     State#state.buffer,
+                     [],[]),
     ?INFO("Return: ~p",[{ok,Data}]),
     {{ok,Data},State#state{buffer=Buffer}}.
 
 terminate(TelnPid,State) ->
     ?INFO("Closing telnet connection.\nId: ~p",[TelnPid]),
-    (State#state.target_mod):close(TelnPid).
+    (State#state.target_mod):close(TelnPid),
+	telnet_client:close(TelnPid).
 
 return({To,Ref},Result) ->
     To ! {Ref, Result}.
@@ -241,26 +239,26 @@ teln_cmd(Pid,Cmd,Prx,Timeout) ->
 
 teln_get_all_data(Pid,Prx,Data,Acc,LastLine) ->
     case check_for_prompt(Prx,lists:reverse(LastLine) ++ Data) of
-	{prompt,Lines,_PromptType,Rest} ->
-	    teln_get_all_data(Pid,Prx,Rest,[Lines|Acc],[]);
-	{noprompt,Lines,LastLine1} ->
-	    case telnet_client:get_data(Pid) of
-		{ok,[]} ->
-		    {ok,lists:reverse(lists:append([Lines|Acc])),
-		     lists:reverse(LastLine1)};
-		{ok,Data1} ->
-		    teln_get_all_data(Pid,Prx,Data1,[Lines|Acc],LastLine1)
-	    end
+    {prompt,Lines,_PromptType,Rest} ->
+        teln_get_all_data(Pid,Prx,Rest,[Lines|Acc],[]);
+    {noprompt,Lines,LastLine1} ->
+        case telnet_client:get_data(Pid) of
+        {ok,[]} ->
+            {ok,lists:reverse(lists:append([Lines|Acc])),
+             lists:reverse(LastLine1)};
+        {ok,Data1} ->
+            teln_get_all_data(Pid,Prx,Data1,[Lines|Acc],LastLine1)
+        end
     end.
     
 %% Expect options record
 -record(eo,{teln_pid,
-	    prx,
-	    timeout,
-	    haltpatterns=[],
-	    seq=false,
-	    repeat=false,
-	    found_prompt=false}).
+        prx,
+        timeout,
+        haltpatterns=[],
+        seq=false,
+        repeat=false,
+        found_prompt=false}).
 
 %% @hidden
 %% @doc Externally the silent_teln_expect function shall only be used
@@ -296,129 +294,129 @@ teln_expect(Pid,Data,Pattern0,Prx,Opts) ->
     Timeout = get_timeout(Opts),
  
     EO = #eo{teln_pid=Pid,
-	     prx=Prx,
-	     timeout=Timeout,
-	     seq=Seq,
-	     haltpatterns=HaltPatterns},
+         prx=Prx,
+         timeout=Timeout,
+         seq=Seq,
+         haltpatterns=HaltPatterns},
     ?INFO("eo:~p",[EO]),
     
     case get_repeat(Opts) of
-	false ->
-	    case teln_expect1(Data,Pattern,[],EO) of
-		{ok,Matched,Rest} ->
-		    {ok,Matched,Rest};
-		{halt,Why,Rest} ->
-		    {error,Why,Rest};
-		{error,Reason} ->
-		    {error,Reason}
-	    end;
-	N ->
-	    EO1 = EO#eo{repeat=N},
-	    repeat_expect(Data,Pattern,[],EO1)
+    false ->
+        case teln_expect1(Data,Pattern,[],EO) of
+        {ok,Matched,Rest} ->
+            {ok,Matched,Rest};
+        {halt,Why,Rest} ->
+            {error,Why,Rest};
+        {error,Reason} ->
+            {error,Reason}
+        end;
+    N ->
+        EO1 = EO#eo{repeat=N},
+        repeat_expect(Data,Pattern,[],EO1)
     end.
 
 convert_pattern(Pattern,Seq) 
   when is_list(Pattern) and not is_integer(hd(Pattern)) ->
     case Seq of
-	true -> Pattern;
-	false -> rm_dupl(Pattern,[])
+    true -> Pattern;
+    false -> rm_dupl(Pattern,[])
     end;
 convert_pattern(Pattern,_Seq) ->
     [Pattern].
 
 rm_dupl([P|Ps],Acc) ->
     case lists:member(P,Acc) of
-	true ->
-	    rm_dupl(Ps,Acc);
-	false ->
-	    rm_dupl(Ps,[P|Acc])
+    true ->
+        rm_dupl(Ps,Acc);
+    false ->
+        rm_dupl(Ps,[P|Acc])
     end;
 rm_dupl([],Acc) ->
     lists:reverse(Acc).
 
 get_timeout(Opts) ->
     case lists:keysearch(timeout,1,Opts) of
-	{value,{timeout,T}} -> T;
-	false -> ?DEFAULT_TIMEOUT
+    {value,{timeout,T}} -> T;
+    false -> ?DEFAULT_TIMEOUT
     end.
 get_repeat(Opts) ->
     case lists:keysearch(repeat,1,Opts) of
-	{value,{repeat,N}} when is_integer(N) ->
-	    N;
-	false ->
-	    case lists:member(repeat,Opts) of
-		true ->
-		    -1;
-		false ->
-		    false
-	    end
+    {value,{repeat,N}} when is_integer(N) ->
+        N;
+    false ->
+        case lists:member(repeat,Opts) of
+        true ->
+            -1;
+        false ->
+            false
+        end
     end.
 get_seq(Opts) ->
     lists:member(sequence,Opts).
 get_haltpatterns(Opts) ->
     case lists:keysearch(halt,1,Opts) of
-	{value,{halt,HaltPatterns}} ->
-	    convert_pattern(HaltPatterns,false);
-	false ->
-	    []
+    {value,{halt,HaltPatterns}} ->
+        convert_pattern(HaltPatterns,false);
+    false ->
+        []
     end.
 get_ignore_prompt(Opts) ->    
     lists:member(ignore_prompt,Opts).
-	
+    
 %% Repeat either single or sequence. All match results are accumulated
 %% and returned when a halt condition is fulllfilled.
 repeat_expect(Rest,_Pattern,Acc,#eo{repeat=0}) ->
     {ok,lists:reverse(Acc),done,Rest};
 repeat_expect(Data,Pattern,Acc,EO) ->
     case teln_expect1(Data,Pattern,[],EO) of
-	{ok,Matched,Rest} ->
-	    EO1 = EO#eo{repeat=EO#eo.repeat-1},
-	    repeat_expect(Rest,Pattern,[Matched|Acc],EO1);
-	{halt,Why,Rest} ->
-	    {ok,lists:reverse(Acc),Why,Rest};
-	{error,Reason} ->
-	    {error,Reason}
+    {ok,Matched,Rest} ->
+        EO1 = EO#eo{repeat=EO#eo.repeat-1},
+        repeat_expect(Rest,Pattern,[Matched|Acc],EO1);
+    {halt,Why,Rest} ->
+        {ok,lists:reverse(Acc),Why,Rest};
+    {error,Reason} ->
+        {error,Reason}
     end.
 
 teln_expect1(Data,Pattern,Acc,EO) ->
     ExpectFun = case EO#eo.seq of
-		    true -> fun() -> seq_expect(Data,Pattern,Acc,EO) end;
-		    false -> fun() -> one_expect(Data,Pattern,EO) end
-		end,
+            true -> fun() -> seq_expect(Data,Pattern,Acc,EO) end;
+            false -> fun() -> one_expect(Data,Pattern,EO) end
+        end,
     case ExpectFun() of
-	{match,Match,Rest} ->
+    {match,Match,Rest} ->
         ?INFO("expect:~p, ~p",[Match, Rest]),
-	    {ok,Match,Rest};
-	{halt,Why,Rest} ->
-	    {halt,Why,Rest};
-	NotFinished ->
-	    %% Get more data
+        {ok,Match,Rest};
+    {halt,Why,Rest} ->
+        {halt,Why,Rest};
+    NotFinished ->
+        %% Get more data
         ?INFO("expect:~p",[NotFinished]),
-	    Fun = fun() -> get_data1(EO#eo.teln_pid) end,
-	    case do_within_time(Fun, EO#eo.timeout) of
-		{error,Reason} -> 
-		    %% A timeout will occur when the telnet connection
-		    %% is idle for EO#eo.timeout milliseconds.
-		    {error,Reason};
-		{ok,Data1} ->
+        Fun = fun() -> get_data1(EO#eo.teln_pid) end,
+        case do_within_time(Fun, EO#eo.timeout) of
+        {error,Reason} -> 
+            %% A timeout will occur when the telnet connection
+            %% is idle for EO#eo.timeout milliseconds.
+            {error,Reason};
+        {ok,Data1} ->
             ?INFO("gen_conn:~p", [Data1]),
-		    case NotFinished of
-			{nomatch,Rest} ->
-			    %% One expect
-			    teln_expect1(Rest++Data1,Pattern,[],EO);
-			{continue,Patterns1,Acc1,Rest} ->
-			    %% Sequence
-			    teln_expect1(Rest++Data1,Patterns1,Acc1,EO)
-		    end
-	    end
+            case NotFinished of
+            {nomatch,Rest} ->
+                %% One expect
+                teln_expect1(Rest++Data1,Pattern,[],EO);
+            {continue,Patterns1,Acc1,Rest} ->
+                %% Sequence
+                teln_expect1(Rest++Data1,Patterns1,Acc1,EO)
+            end
+        end
     end.
 
 get_data1(Pid) ->
     case telnet_client:get_data(Pid) of
-	{ok,[]} ->
-	    get_data1(Pid);
-	{ok,Data} ->
-	    {ok,Data}
+    {ok,[]} ->
+        get_data1(Pid);
+    {ok,Data} ->
+        {ok,Data}
     end.
 
 %% 1) Single expect.
@@ -431,31 +429,31 @@ get_data1(Pid) ->
 one_expect(Data,Pattern,EO) ->
     ?INFO("prompt:~p",[match_prompt(Data,EO#eo.prx)]),
     case match_prompt(Data,EO#eo.prx) of
-	{prompt,UptoPrompt,PromptType,Rest} ->
-	    case Pattern of 
-		[Prompt] when Prompt==prompt; Prompt=={prompt,PromptType} ->
-		    %% Only searching for prompt
-		    log_lines(UptoPrompt),
-		    ?INFO("PROMPT:~s", [PromptType]),
-		    {match,{prompt,PromptType},Rest};
-		[{prompt,_OtherPromptType}] ->
-		    %% Only searching for one specific prompt, not thisone
-		    log_lines(UptoPrompt),
-		    {nomatch,Rest};
-		_ ->
-		    one_expect1(UptoPrompt,Pattern,Rest,
-				EO#eo{found_prompt=PromptType})
-	    end;
-	noprompt ->
-	    case Pattern of
-		[Prompt] when Prompt==prompt; element(1,Prompt)==prompt ->
-		    %% Only searching for prompt
-		    LastLine = log_lines_not_last(Data),
+    {prompt,UptoPrompt,PromptType,Rest} ->
+        case Pattern of 
+        [Prompt] when Prompt==prompt; Prompt=={prompt,PromptType} ->
+            %% Only searching for prompt
+            log_lines(UptoPrompt),
+            ?INFO("PROMPT:~s", [PromptType]),
+            {match,{prompt,PromptType},Rest};
+        [{prompt,_OtherPromptType}] ->
+            %% Only searching for one specific prompt, not thisone
+            log_lines(UptoPrompt),
+            {nomatch,Rest};
+        _ ->
+            one_expect1(UptoPrompt,Pattern,Rest,
+                EO#eo{found_prompt=PromptType})
+        end;
+    noprompt ->
+        case Pattern of
+        [Prompt] when Prompt==prompt; element(1,Prompt)==prompt ->
+            %% Only searching for prompt
+            LastLine = log_lines_not_last(Data),
             ?INFO("get lastline:~p", [LastLine]),
-		    {nomatch,LastLine};
-		_ ->
-		    one_expect1(Data,Pattern,[],EO#eo{found_prompt=false})
-	    end
+            {nomatch,LastLine};
+        _ ->
+            one_expect1(Data,Pattern,[],EO#eo{found_prompt=false})
+        end
     end.
 
 remove_zero(List) ->
@@ -464,14 +462,14 @@ remove_zero(List) ->
 %% one_expect1: split data chunk at lines
 one_expect1(Data,Pattern,Rest,EO) ->
     case match_lines(Data,Pattern,EO) of
-	{match,Match,MatchRest} ->
-	    {match,Match,MatchRest++Rest};
-	{nomatch,prompt} ->
-	    one_expect(Rest,Pattern,EO);
-	{nomatch,NoMatchRest} ->
-	    {nomatch,NoMatchRest++Rest};
-	{halt,Why,HaltRest} ->
-	    {halt,Why,HaltRest++Rest}
+    {match,Match,MatchRest} ->
+        {match,Match,MatchRest++Rest};
+    {nomatch,prompt} ->
+        one_expect(Rest,Pattern,EO);
+    {nomatch,NoMatchRest} ->
+        {nomatch,NoMatchRest++Rest};
+    {halt,Why,HaltRest} ->
+        {halt,Why,HaltRest++Rest}
     end.
     
 
@@ -490,51 +488,51 @@ seq_expect([],Patterns,Acc,_EO) ->
     {continue,Patterns,lists:reverse(Acc),[]};
 seq_expect(Data,Patterns,Acc,EO) ->
     case match_prompt(Data,EO#eo.prx) of
-	{prompt,UptoPrompt,PromptType,Rest} ->
-	    seq_expect1(UptoPrompt,Patterns,Acc,Rest,
-			EO#eo{found_prompt=PromptType});
-	noprompt ->
-	    seq_expect1(Data,Patterns,Acc,[],EO#eo{found_prompt=false})
+    {prompt,UptoPrompt,PromptType,Rest} ->
+        seq_expect1(UptoPrompt,Patterns,Acc,Rest,
+            EO#eo{found_prompt=PromptType});
+    noprompt ->
+        seq_expect1(Data,Patterns,Acc,[],EO#eo{found_prompt=false})
     end.
 
 %% seq_expect1: For one prompt-chunk, match each pattern - line by
 %% line if it is other than the prompt we are seaching for.
 seq_expect1(Data,[prompt|Patterns],Acc,Rest,EO) ->
     case EO#eo.found_prompt of
-	false ->
-	    LastLine = log_lines_not_last(Data),
-	    %% Rest==[] because no prompt is found
-	    {continue,[prompt|Patterns],Acc,LastLine};
-	PromptType ->
-	    log_lines(Data),
-	    %%try_cont_log("<b>PROMPT:</b> ~s", [PromptType]),
-	    seq_expect(Rest,Patterns,[{prompt,PromptType}|Acc],EO)
+    false ->
+        LastLine = log_lines_not_last(Data),
+        %% Rest==[] because no prompt is found
+        {continue,[prompt|Patterns],Acc,LastLine};
+    PromptType ->
+        log_lines(Data),
+        %%try_cont_log("<b>PROMPT:</b> ~s", [PromptType]),
+        seq_expect(Rest,Patterns,[{prompt,PromptType}|Acc],EO)
     end;
 seq_expect1(Data,[{prompt,PromptType}|Patterns],Acc,Rest,EO) ->
     case EO#eo.found_prompt of
-	false ->
-	    LastLine = log_lines_not_last(Data),
-	    %% Rest==[] because no prompt is found
-	    {continue,[{prompt,PromptType}|Patterns],Acc,LastLine};
-	PromptType ->
-	    log_lines(Data),
-	    %%try_cont_log("<b>PROMPT:</b> ~s", [PromptType]),
-	    seq_expect(Rest,Patterns,[{prompt,PromptType}|Acc],EO);
-	_OtherPromptType ->
-	    log_lines(Data),
-	    seq_expect(Rest,[{prompt,PromptType}|Patterns],Acc,EO)
+    false ->
+        LastLine = log_lines_not_last(Data),
+        %% Rest==[] because no prompt is found
+        {continue,[{prompt,PromptType}|Patterns],Acc,LastLine};
+    PromptType ->
+        log_lines(Data),
+        %%try_cont_log("<b>PROMPT:</b> ~s", [PromptType]),
+        seq_expect(Rest,Patterns,[{prompt,PromptType}|Acc],EO);
+    _OtherPromptType ->
+        log_lines(Data),
+        seq_expect(Rest,[{prompt,PromptType}|Patterns],Acc,EO)
     end;
 seq_expect1(Data,[Pattern|Patterns],Acc,Rest,EO) ->
     case match_lines(Data,[Pattern],EO) of
-	{match,Match,MatchRest} ->
-	    seq_expect1(MatchRest,Patterns,[Match|Acc],Rest,EO);
-	{nomatch,prompt} ->
-	    seq_expect(Rest,[Pattern|Patterns],Acc,EO);
-	{nomatch,NoMatchRest} when Rest==[] ->
-	    %% The data did not end with a prompt
-	    {continue,[Pattern|Patterns],Acc,NoMatchRest};
-	{halt,Why,HaltRest} ->
-	    {halt,Why,HaltRest++Rest}
+    {match,Match,MatchRest} ->
+        seq_expect1(MatchRest,Patterns,[Match|Acc],Rest,EO);
+    {nomatch,prompt} ->
+        seq_expect(Rest,[Pattern|Patterns],Acc,EO);
+    {nomatch,NoMatchRest} when Rest==[] ->
+        %% The data did not end with a prompt
+        {continue,[Pattern|Patterns],Acc,NoMatchRest};
+    {halt,Why,HaltRest} ->
+        {halt,Why,HaltRest++Rest}
     end;
 seq_expect1(Data,[],Acc,Rest,_EO) ->
     {match,lists:reverse(Acc),Data++Rest}.
@@ -543,23 +541,23 @@ seq_expect1(Data,[],Acc,Rest,_EO) ->
 match_lines(Data,Patterns,EO) ->
     FoundPrompt = EO#eo.found_prompt,
     case one_line(Data,[]) of
-	{noline,Rest} when FoundPrompt=/=false ->
-	    %% This is the line including the prompt
-	    case match_line(Rest,Patterns,FoundPrompt,EO) of
-		nomatch ->
-		    {nomatch,prompt};
-		{Tag,Match} ->
-		    {Tag,Match,[]}
-	    end;
-	{noline,Rest} ->
-	    {nomatch,Rest};
-	{Line,Rest} ->
-	    case match_line(Line,Patterns,false,EO) of
-		nomatch ->
-		    match_lines(Rest,Patterns,EO);
-		{Tag,Match} ->
-		    {Tag,Match,Rest}
-	    end
+    {noline,Rest} when FoundPrompt=/=false ->
+        %% This is the line including the prompt
+        case match_line(Rest,Patterns,FoundPrompt,EO) of
+        nomatch ->
+            {nomatch,prompt};
+        {Tag,Match} ->
+            {Tag,Match,[]}
+        end;
+    {noline,Rest} ->
+        {nomatch,Rest};
+    {Line,Rest} ->
+        case match_line(Line,Patterns,false,EO) of
+        nomatch ->
+            match_lines(Rest,Patterns,EO);
+        {Tag,Match} ->
+            {Tag,Match,Rest}
+        end
     end.
     
 
@@ -583,19 +581,19 @@ match_line(Line,[{prompt,PromptType}|Patterns],FoundPrompt,EO,RetTag)
     match_line(Line,Patterns,FoundPrompt,EO,RetTag);
 match_line(Line,[{Tag,Pattern}|Patterns],FoundPrompt,EO,RetTag) ->
     case re:run(Line,Pattern,[{capture,all,list}]) of
-	nomatch ->
-	    match_line(Line,Patterns,FoundPrompt,EO,RetTag);
-	{match,Match} ->
-	    %%try_cont_log("<b>MATCH:</b> ~s", [Line]),
-	    {RetTag,{Tag,Match}}
+    nomatch ->
+        match_line(Line,Patterns,FoundPrompt,EO,RetTag);
+    {match,Match} ->
+        %%try_cont_log("<b>MATCH:</b> ~s", [Line]),
+        {RetTag,{Tag,Match}}
     end;
 match_line(Line,[Pattern|Patterns],FoundPrompt,EO,RetTag) ->
     case re:run(Line,Pattern,[{capture,all,list}]) of
-	nomatch ->
-	    match_line(Line,Patterns,FoundPrompt,EO,RetTag);
-	{match,Match} ->
-	    %%try_cont_log("<b>MATCH:</b> ~s", [Line]),
-	    {RetTag,Match}
+    nomatch ->
+        match_line(Line,Patterns,FoundPrompt,EO,RetTag);
+    {match,Match} ->
+        %%try_cont_log("<b>MATCH:</b> ~s", [Line]),
+        {RetTag,Match}
     end;
 match_line(Line,[],FoundPrompt,EO,match) ->
     match_line(Line,EO#eo.haltpatterns,FoundPrompt,EO,halt);
@@ -620,19 +618,19 @@ debug_log_lines(String) ->
 
 log_lines(String) ->
     case log_lines_not_last(String) of
-	[] ->
-	    ok;
-	LastLine ->
-	    ?INFO("       ~s", [LastLine])
+    [] ->
+        ok;
+    LastLine ->
+        ?INFO("       ~s", [LastLine])
     end.
 
 log_lines_not_last(String) ->
     ?INFO("get string :~p",[String]),
     case add_tabs(String,[],[]) of
-	{[],LastLine} ->
-	    LastLine;
-	{String1,LastLine} ->
-	    ?INFO("~s",[String1]),
+    {[],LastLine} ->
+        LastLine;
+    {String1,LastLine} ->
+        ?INFO("~s",[String1]),
         LastLine
     end.
 
@@ -660,21 +658,21 @@ teln_receive_until_prompt(Pid,Prx,Timeout) ->
 teln_receive_until_prompt(Pid,Prx,Acc,LastLine) ->
     {ok,Data} = telnet_client:get_data(Pid),
     case check_for_prompt(Prx,LastLine ++ Data) of
-	{prompt,Lines,PromptType,Rest} ->
-	    Return = lists:reverse(lists:append([Lines|Acc])),
-	   {ok,Return,PromptType,Rest};
-	{noprompt,Lines,LastLine1} ->
-	    teln_receive_until_prompt(Pid,Prx,[Lines|Acc],LastLine1)
+    {prompt,Lines,PromptType,Rest} ->
+        Return = lists:reverse(lists:append([Lines|Acc])),
+       {ok,Return,PromptType,Rest};
+    {noprompt,Lines,LastLine1} ->
+        teln_receive_until_prompt(Pid,Prx,[Lines|Acc],LastLine1)
    end.
 
 check_for_prompt(Prx,Data) ->
     case match_prompt(Data,Prx) of
-	{prompt,UptoPrompt,PromptType,Rest} ->
-	    {RevLines,LastLine} = split_lines(UptoPrompt),
-	    {prompt,[LastLine|RevLines],PromptType,Rest};
-	noprompt ->
-	    {RevLines,Rest} = split_lines(Data),
-	    {noprompt,RevLines,Rest}
+    {prompt,UptoPrompt,PromptType,Rest} ->
+        {RevLines,LastLine} = split_lines(UptoPrompt),
+        {prompt,[LastLine|RevLines],PromptType,Rest};
+    noprompt ->
+        {RevLines,Rest} = split_lines(Data),
+        {noprompt,RevLines,Rest}
     end.
 
 split_lines(String) ->
@@ -698,16 +696,16 @@ match_prompt(Str,Prx) ->
     match_prompt(Str,Prx,[]).
 match_prompt(Str,Prx,Acc) ->
     case re:run(Str,Prx) of
-	nomatch ->
-	    noprompt;
-	{match,[{Start,Len}]} ->
-	    case split_prompt_string(Str,Start+1,Start+Len,1,[],[]) of
-		{noprompt,Done,Rest} ->
-		    match_prompt(Rest,Prx,Done);
-		{prompt,UptoPrompt,Prompt,Rest} ->
-		    {prompt,lists:reverse(UptoPrompt++Acc),
-		     lists:reverse(Prompt),Rest}
-	    end
+    nomatch ->
+        noprompt;
+    {match,[{Start,Len}]} ->
+        case split_prompt_string(Str,Start+1,Start+Len,1,[],[]) of
+        {noprompt,Done,Rest} ->
+            match_prompt(Rest,Prx,Done);
+        {prompt,UptoPrompt,Prompt,Rest} ->
+            {prompt,lists:reverse(UptoPrompt++Acc),
+             lists:reverse(Prompt),Rest}
+        end
     end.
 
 split_prompt_string([Ch|Str],Start,End,N,UptoPrompt,Prompt) when N<Start ->
@@ -717,15 +715,15 @@ split_prompt_string([Ch|Str],Start,End,N,UptoPrompt,Prompt)
     split_prompt_string(Str,Start,End,N+1,UptoPrompt,[Ch|Prompt]);
 split_prompt_string([Ch|Rest],_Start,End,N,UptoPrompt,Prompt) when N==End ->
     case UptoPrompt of
-	[$",$=,$T,$P,$M,$O,$R,$P|_] ->
-	    %% This is a line from "listenv", it is not a real prompt
-	    {noprompt,[Ch|Prompt]++UptoPrompt,Rest};
-	[$\s,$t,$s,$a|_] when Prompt==":nigol" ->
-	    %% This is probably the "Last login:" statement which is
-	    %% written when telnet connection is openend.
-	    {noprompt,[Ch|Prompt]++UptoPrompt,Rest};
-	_ ->
-	    {prompt,[Ch|Prompt]++UptoPrompt,[Ch|Prompt],Rest}
+    [$",$=,$T,$P,$M,$O,$R,$P|_] ->
+        %% This is a line from "listenv", it is not a real prompt
+        {noprompt,[Ch|Prompt]++UptoPrompt,Rest};
+    [$\s,$t,$s,$a|_] when Prompt==":nigol" ->
+        %% This is probably the "Last login:" statement which is
+        %% written when telnet connection is openend.
+        {noprompt,[Ch|Prompt]++UptoPrompt,Rest};
+    _ ->
+        {prompt,[Ch|Prompt]++UptoPrompt,[Ch|Prompt],Rest}
     end.
 
 %%%-----------------------------------------------------------------
@@ -743,30 +741,30 @@ split_prompt_string([Ch|Rest],_Start,End,N,UptoPrompt,Prompt) when N==End ->
 do_within_time(Fun,Timeout) ->
     Self = self(),
     TmpPid = spawn_link(fun() ->
-				 R = Fun(),
-				 Self ! {self(),R}
-			end),
+                 R = Fun(),
+                 Self ! {self(),R}
+            end),
     ConnPid = get(conn_pid),
     receive
-	{TmpPid,Result} ->
-	    Result;
-	{'EXIT',ConnPid,_Reason}=M ->
-	    unlink(TmpPid),
-	    exit(TmpPid,kill),
-	    self() ! M,
-	    {error,connection_closed}
+    {TmpPid,Result} ->
+        Result;
+    {'EXIT',ConnPid,_Reason}=M ->
+        unlink(TmpPid),
+        exit(TmpPid,kill),
+        self() ! M,
+        {error,connection_closed}
     after
-	Timeout ->
+    Timeout ->
         ?INFO("time out ...~p", [Timeout]),
-	    exit(TmpPid,kill),
-	    receive
-		{TmpPid,Result} ->
-		    %% TmpPid just managed to send the result at the same time
-		    %% as the timeout expired.
-		    receive {'EXIT',TmpPid,_reason} -> ok end,
-		    Result;
-		{'EXIT',TmpPid,killed} ->
-		    %% TmpPid did not send the result before the timeout expired.
-		    {error,timeout}
-	    end
+        exit(TmpPid,kill),
+        receive
+        {TmpPid,Result} ->
+            %% TmpPid just managed to send the result at the same time
+            %% as the timeout expired.
+            receive {'EXIT',TmpPid,_reason} -> ok end,
+            Result;
+        {'EXIT',TmpPid,killed} ->
+            %% TmpPid did not send the result before the timeout expired.
+            {error,timeout}
+        end
     end.

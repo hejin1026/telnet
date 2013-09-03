@@ -42,26 +42,26 @@
 -define(IDLE_TIMEOUT,10000).
 
 %% telnet control characters
--define(SE,	240).
--define(NOP,	241).
--define(DM,	242).
--define(BRK,	243).
--define(IP,	244).
--define(AO,	245).
--define(AYT,	246).
--define(EC,	247).
--define(EL,	248).
--define(GA,	249).
--define(SB,	250).
--define(WILL,	251).
--define(WONT,	252).
--define(DO,	253).
--define(DONT,	254).
--define(IAC,	255).
+-define(SE, 240).
+-define(NOP,    241).
+-define(DM, 242).
+-define(BRK,    243).
+-define(IP, 244).
+-define(AO, 245).
+-define(AYT,    246).
+-define(EC, 247).
+-define(EL, 248).
+-define(GA, 249).
+-define(SB, 250).
+-define(WILL,   251).
+-define(WONT,   252).
+-define(DO, 253).
+-define(DONT,   254).
+-define(IAC,    255).
 
 %% telnet options
 -define(BINARY,            0).
--define(ECHO,	           1).
+-define(ECHO,              1).
 -define(SUPPRESS_GO_AHEAD, 3).
 -define(TERMINAL_TYPE,     24).  
 -define(WINDOW_SIZE,       31).
@@ -139,7 +139,7 @@ loop(State, Sock, Acc) ->
                 case Acc of
                     [] ->
                         ?INFO("get_data nodata\n",[]),
-                        erlang:send_after(100,self(),{get_data_delayed,Pid}),
+                        erlang:send_after(500,self(),{get_data_delayed,Pid}),
                         if State#state.keep_alive == true ->
                                 State#state{get_data=State#state.get_data - 1};
                             State#state.keep_alive == false ->
@@ -242,10 +242,10 @@ respond_cmd([?WILL,?SUPPRESS_GO_AHEAD], _Sock) ->
 respond_cmd([?WONT,?SUPPRESS_GO_AHEAD], _Sock) ->
     ?INFO("Warning! Server won't suppress-go-ahead\n", []);
 
-respond_cmd([?DONT | _Opt], _Sock) ->		% server ack?
-    ok;						
-respond_cmd([?WONT | _Opt], _Sock) ->		% server ack?
-    ok;						
+respond_cmd([?DONT | _Opt], _Sock) ->       % server ack?
+    ok;                     
+respond_cmd([?WONT | _Opt], _Sock) ->       % server ack?
+    ok;                     
 
 %% Negative responses (WON'T and DON'T). These are default!
 
@@ -326,3 +326,4 @@ dbg(_Str,_Args) ->
 cmd_dbg(_Cmd) ->
     ok.
 -endif.
+
